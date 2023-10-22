@@ -7,6 +7,8 @@ import (
 	"image/color"
 	"math"
 	"math/rand"
+	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/faiface/pixel"
@@ -17,7 +19,7 @@ import (
 const (
 	WindowWidth  = 1440.0
 	WindowHeight = 900.0
-	BoidsCount   = 1000
+	BoidsCount   = 500
 )
 
 type Entity struct {
@@ -31,6 +33,89 @@ type MovementComponent struct { // Composite component for better data locality 
 	Position     Vector2D
 	Velocity     Vector2D
 	Acceleration Vector2D
+}
+
+type Rectangle struct {
+	Center Vector2D
+	Width  float64
+	Height float64
+}
+
+func (r *Rectangle) Contains(point Vector2D) bool {
+	return point.X >= r.Center.X-r.Width/2 &&
+		point.X <= r.Center.X+r.Width/2 &&
+		point.Y >= r.Center.Y-r.Height/2 &&
+		point.Y <= r.Center.Y+r.Height/2
+}
+
+func (r *Rectangle) Intersects(rangeRec Rectangle) bool {
+	return !(rangeRec.Center.X-rangeRec.Width/2 > r.Center.X+r.Width/2 ||
+		rangeRec.Center.X+rangeRec.Width/2 < r.Center.X-r.Width/2 ||
+		rangeRec.Center.Y-rangeRec.Height/2 > r.Center.Y+r.Height/2 ||
+		rangeRec.Center.Y+rangeRec.Height/2 < r.Center.Y-r.Height/2)
+}
+
+const capacity = 32 // adjust as needed
+type Quadtree struct {
+	Boundary       Rectangle
+	Components     []*MovementComponent
+	Divided        bool
+	NW, NE, SW, SE *Quadtree
+}
+
+func NewQuadtree(boundary Rectangle) *Quadtree {
+	return &Quadtree{
+		Boundary:   boundary,
+		Components: make([]*MovementComponent, 0, capacity),
+	}
+}
+
+func (qt *Quadtree) Subdivide() {
+	x, y := qt.Boundary.Center.X, qt.Boundary.Center.Y
+	w, h := qt.Boundary.Width/2, qt.Boundary.Height/2
+	qt.NW = NewQuadtree(Rectangle{Vector2D{X: x - w/2, Y: y - h/2}, w, h})
+	qt.NE = NewQuadtree(Rectangle{Vector2D{X: x + w/2, Y: y - h/2}, w, h})
+	qt.SW = NewQuadtree(Rectangle{Vector2D{X: x - w/2, Y: y + h/2}, w, h})
+	qt.SE = NewQuadtree(Rectangle{Vector2D{X: x + w/2, Y: y + h/2}, w, h})
+	qt.Divided = true
+}
+
+func (qt *Quadtree) Insert(component *MovementComponent) bool {
+	if !qt.Boundary.Contains(component.Position) {
+		return false
+	}
+
+	if len(qt.Components) < capacity {
+		qt.Components = append(qt.Components, component)
+		return true
+	}
+
+	if !qt.Divided {
+		qt.Subdivide()
+	}
+
+	return qt.NW.Insert(component) || qt.NE.Insert(component) || qt.SW.Insert(component) || qt.SE.Insert(component)
+}
+
+func (qt *Quadtree) Query(rangeRec Rectangle, foundComponents []*MovementComponent) []*MovementComponent {
+	if !qt.Boundary.Intersects(rangeRec) {
+		return foundComponents
+	}
+
+	for _, component := range qt.Components {
+		if rangeRec.Contains(component.Position) {
+			foundComponents = append(foundComponents, component)
+		}
+	}
+
+	if qt.Divided {
+		foundComponents = qt.NW.Query(rangeRec, foundComponents)
+		foundComponents = qt.NE.Query(rangeRec, foundComponents)
+		foundComponents = qt.SW.Query(rangeRec, foundComponents)
+		foundComponents = qt.SE.Query(rangeRec, foundComponents)
+	}
+
+	return foundComponents
 }
 
 // Systems
@@ -57,7 +142,7 @@ type SteeringSystem struct {
 	maxSpeed          float64
 }
 
-func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementComponent) {
+func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementComponent, qt *Quadtree) {
 	for i := range movementComponents {
 
 		var current = &movementComponents[i]
@@ -66,23 +151,31 @@ func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementCompone
 		separationSteering := Vector2D{}
 		var neighborCount float64 = 0.0
 
-		for j := range movementComponents {
-			var other = &movementComponents[j]
+		rangeRec := Rectangle{
+			Center: current.Position,
+			Width:  bs.neighborhoodRange,
+			Height: bs.neighborhoodRange,
+		}
+
+		neighbours := qt.Query(rangeRec, nil)
+
+		for j := range neighbours {
+			var other = neighbours[j]
+
 			if current == other {
 				continue
 			}
+
 			d := current.Position.Distance(other.Position)
-			if d < bs.neighborhoodRange {
-				alignmentSteering.Add(other.Velocity)
-				cohesionSteering.Add(other.Position)
+			alignmentSteering.Add(other.Velocity)
+			cohesionSteering.Add(other.Position)
 
-				diff := current.Position
-				diff.Subtract(other.Position)
-				diff.Divide(d) // Not squared?
-				separationSteering.Add(diff)
+			diff := current.Position
+			diff.Subtract(other.Position)
+			diff.Divide(d) // Not squared?
+			separationSteering.Add(diff)
 
-				neighborCount++
-			}
+			neighborCount++
 		}
 
 		if neighborCount > 0 {
@@ -259,7 +352,19 @@ func run() {
 			boidSprite.Draw(win, mat)
 		}
 
-		steeringSystem.Update(&movementComponents)
+		boundary := Rectangle{
+			Center: vector.Vector2D{X: WindowWidth / 2, Y: WindowHeight / 2},
+			Width:  WindowWidth,
+			Height: WindowHeight,
+		}
+
+		qt := NewQuadtree(boundary)
+
+		for i := range movementComponents {
+			qt.Insert(&movementComponents[i])
+		}
+
+		steeringSystem.Update(&movementComponents, qt)
 		movementSystem.Update(&movementComponents)
 		win.Update()
 
@@ -308,5 +413,16 @@ func sign(p1, p2, p3 pixel.Vec) float64 {
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
+
+	// Start profiling
+	f, err := os.Create("myprogram.prof")
+	if err != nil {
+
+		fmt.Println(err)
+		return
+
+	}
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
 	pixelgl.Run(run)
 }
