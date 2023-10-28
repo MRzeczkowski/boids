@@ -18,29 +18,25 @@ import (
 const (
 	WindowWidth  = 1440.0
 	WindowHeight = 900.0
-	BoidsCount   = 200
+	BoidsCount   = 1000
 )
 
-type Entity struct {
-	ID int
-}
+// Entity is not needed. Boids will be identified by their number from 0 to BoidsCount
 
 // Components
 type Vector2D = vector.Vector2D
 
-type MovementComponent struct { // Composite component for better data locality - see MovementSystem.Update for example
-	Position     Vector2D
-	Velocity     Vector2D
-	Acceleration Vector2D
-}
+type Position = Vector2D
+type Velocity = Vector2D
+type Acceleration = Vector2D
 
 type Rectangle struct {
-	Center Vector2D
+	Center Position
 	Width  float64
 	Height float64
 }
 
-func (r *Rectangle) Contains(point Vector2D) bool {
+func (r *Rectangle) Contains(point Position) bool {
 	return point.X >= r.Center.X-r.Width/2 &&
 		point.X <= r.Center.X+r.Width/2 &&
 		point.Y >= r.Center.Y-r.Height/2 &&
@@ -54,19 +50,19 @@ func (r *Rectangle) Intersects(rangeRec Rectangle) bool {
 		rangeRec.Center.Y+rangeRec.Height/2 < r.Center.Y-r.Height/2)
 }
 
-const capacity = 16 // adjust as needed
+const capacity = 128 // adjust as needed
 
 var quadtreePool = sync.Pool{
 	New: func() interface{} {
 		return &Quadtree{
-			Components: make([]*MovementComponent, 0, capacity),
+			Components: make([]*int, 0, capacity),
 		}
 	},
 }
 
 type Quadtree struct {
 	Boundary       Rectangle
-	Components     []*MovementComponent
+	Components     []*int
 	Divided        bool
 	NW, NE, SW, SE *Quadtree
 }
@@ -118,13 +114,13 @@ func (qt *Quadtree) Subdivide() {
 	qt.Divided = true
 }
 
-func (qt *Quadtree) Insert(component *MovementComponent) bool {
-	if !qt.Boundary.Contains(component.Position) {
+func (qt *Quadtree) Insert(component *Position, i *int) bool {
+	if !qt.Boundary.Contains(*component) {
 		return false
 	}
 
 	if len(qt.Components) < capacity {
-		qt.Components = append(qt.Components, component)
+		qt.Components = append(qt.Components, i)
 		return true
 	}
 
@@ -132,16 +128,16 @@ func (qt *Quadtree) Insert(component *MovementComponent) bool {
 		qt.Subdivide()
 	}
 
-	return qt.NW.Insert(component) || qt.NE.Insert(component) || qt.SW.Insert(component) || qt.SE.Insert(component)
+	return qt.NW.Insert(component, i) || qt.NE.Insert(component, i) || qt.SW.Insert(component, i) || qt.SE.Insert(component, i)
 }
 
-func (qt *Quadtree) Query(rangeRec Rectangle, foundComponents []*MovementComponent) []*MovementComponent {
+func (qt *Quadtree) Query(rangeRec Rectangle, foundComponents []*int) []*int {
 	if !qt.Boundary.Intersects(rangeRec) {
 		return foundComponents
 	}
 
 	for _, component := range qt.Components {
-		if rangeRec.Contains(component.Position) {
+		if rangeRec.Contains(positionComponents[*component]) {
 			foundComponents = append(foundComponents, component)
 		}
 	}
@@ -161,13 +157,12 @@ type MovementSystem struct {
 	maxSpeed float64
 }
 
-func (ms *MovementSystem) Update(movementComponents *[BoidsCount]MovementComponent) {
-	for i := range movementComponents {
-		var m = &movementComponents[i]
-		m.Position.Add(&m.Velocity)
-		m.Velocity.Add(&m.Acceleration)
-		m.Velocity.Limit(ms.maxSpeed)
-		m.Acceleration.Multiply(0)
+func (ms *MovementSystem) Update() {
+	for i := 0; i < BoidsCount; i++ {
+		positionComponents[i].Add(&velocityComponents[i])
+		velocityComponents[i].Add(&accelerationComponents[i])
+		velocityComponents[i].Limit(ms.maxSpeed)
+		accelerationComponents[i].Multiply(0)
 	}
 }
 
@@ -180,36 +175,41 @@ type SteeringSystem struct {
 	maxSpeed          float64
 }
 
-func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementComponent, qt *Quadtree) {
-	for i := range movementComponents {
+var alignmentSteering = Vector2D{}
+var cohesionSteering = Vector2D{}
+var separationSteering = Vector2D{}
 
-		var current = &movementComponents[i]
-		alignmentSteering := Vector2D{}
-		cohesionSteering := Vector2D{}
-		separationSteering := Vector2D{}
+func (bs *SteeringSystem) Update() {
+	for i := 0; i < BoidsCount; i++ {
+
+		alignmentSteering.Multiply(0)
+		cohesionSteering.Multiply(0)
+		separationSteering.Multiply(0)
+
 		var neighborCount float64 = 0.0
 
 		rangeRec := Rectangle{
-			Center: current.Position,
+			Center: positionComponents[i],
 			Width:  bs.neighborhoodRange,
 			Height: bs.neighborhoodRange,
 		}
 
 		neighbours := qt.Query(rangeRec, nil)
 
-		for j := range neighbours {
-			var other = neighbours[j]
+		for _, j := range neighbours {
+			var otherPosition = &positionComponents[*j]
+			var otherVelocity = &velocityComponents[*j]
 
-			if current == other {
+			if i == *j {
 				continue
 			}
 
-			d := current.Position.Distance(&other.Position)
-			alignmentSteering.Add(&other.Velocity)
-			cohesionSteering.Add(&other.Position)
+			d := positionComponents[i].Distance(otherPosition)
+			alignmentSteering.Add(otherVelocity)
+			cohesionSteering.Add(otherPosition)
 
-			diff := current.Position
-			diff.Subtract(&other.Position)
+			diff := positionComponents[i]
+			diff.Subtract(otherPosition)
 			diff.Divide(d) // Not squared?
 			separationSteering.Add(&diff)
 
@@ -220,28 +220,28 @@ func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementCompone
 
 			alignmentSteering.Divide(neighborCount)
 			alignmentSteering.SetMagnitude(bs.maxSpeed)
-			alignmentSteering.Subtract(&current.Velocity)
+			alignmentSteering.Subtract(&velocityComponents[i])
 			alignmentSteering.Limit(bs.maxForce)
 
 			cohesionSteering.Divide(neighborCount)
-			cohesionSteering.Subtract(&current.Position)
+			cohesionSteering.Subtract(&positionComponents[i])
 			cohesionSteering.SetMagnitude(bs.maxSpeed)
-			cohesionSteering.Subtract(&current.Velocity)
+			cohesionSteering.Subtract(&velocityComponents[i])
 			cohesionSteering.Limit(bs.maxForce)
 
 			separationSteering.Divide(neighborCount)
 			separationSteering.SetMagnitude(bs.maxSpeed)
-			separationSteering.Subtract(&current.Velocity)
+			separationSteering.Subtract(&velocityComponents[i])
 			separationSteering.SetMagnitude(bs.maxForce)
 
 			alignmentSteering.Multiply(bs.alignmentFactor)
 			cohesionSteering.Multiply(bs.cohesionFactor)
 			separationSteering.Multiply(bs.separationFactor)
 
-			current.Acceleration.Add(&alignmentSteering)
-			current.Acceleration.Add(&cohesionSteering)
-			current.Acceleration.Add(&separationSteering)
-			current.Acceleration.Divide(3) // WHY?
+			accelerationComponents[i].Add(&alignmentSteering)
+			accelerationComponents[i].Add(&cohesionSteering)
+			accelerationComponents[i].Add(&separationSteering)
+			accelerationComponents[i].Divide(3) // WHY?
 		}
 
 		const boundaryMargin = 50.0
@@ -250,48 +250,56 @@ func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementCompone
 		const bounce = false
 
 		if bounce {
-			// If boid is near left boundary
-			if current.Position.X < boundaryMargin {
-				current.Velocity.X += boundaryForce
-			}
+			// // If boid is near left boundary
+			// if current.Position.X < boundaryMargin {
+			// 	current.Velocity.X += boundaryForce
+			// }
 
-			// If boid is near right boundary
-			if current.Position.X > WindowWidth-boundaryMargin {
-				current.Velocity.X -= boundaryForce
-			}
+			// // If boid is near right boundary
+			// if current.Position.X > WindowWidth-boundaryMargin {
+			// 	current.Velocity.X -= boundaryForce
+			// }
 
-			// If boid is near bottom boundary
-			if current.Position.Y < boundaryMargin {
-				current.Velocity.Y += boundaryForce
-			}
+			// // If boid is near bottom boundary
+			// if current.Position.Y < boundaryMargin {
+			// 	current.Velocity.Y += boundaryForce
+			// }
 
-			// If boid is near top boundary
-			if current.Position.Y > WindowHeight-boundaryMargin {
-				current.Velocity.Y -= boundaryForce
-			}
+			// // If boid is near top boundary
+			// if current.Position.Y > WindowHeight-boundaryMargin {
+			// 	current.Velocity.Y -= boundaryForce
+			// }
 		} else {
 			// If boid crosses left boundary
-			if current.Position.X < 0 {
-				current.Position.X = WindowWidth
+			if positionComponents[i].X < 0 {
+				positionComponents[i].X = WindowWidth
 			}
 
 			// If boid crosses right boundary
-			if current.Position.X > WindowWidth {
-				current.Position.X = 0
+			if positionComponents[i].X > WindowWidth {
+				positionComponents[i].X = 0
 			}
 
 			// If boid crosses bottom boundary
-			if current.Position.Y < 0 {
-				current.Position.Y = WindowHeight
+			if positionComponents[i].Y < 0 {
+				positionComponents[i].Y = WindowHeight
 			}
 
 			// If boid crosses top boundary
-			if current.Position.Y > WindowHeight {
-				current.Position.Y = 0
+			if positionComponents[i].Y > WindowHeight {
+				positionComponents[i].Y = 0
 			}
 		}
 	}
 }
+
+//var movementComponents [BoidsCount]MovementComponent
+
+var ids [BoidsCount]int
+var positionComponents [BoidsCount]Position
+var velocityComponents [BoidsCount]Position
+var accelerationComponents [BoidsCount]Position
+var qt *Quadtree
 
 func run() {
 	cfg := pixelgl.WindowConfig{
@@ -304,18 +312,19 @@ func run() {
 		panic(err)
 	}
 
-	var entities [BoidsCount]Entity
-	var movementComponents [BoidsCount]MovementComponent
-
 	for i := 0; i < BoidsCount; i++ {
 		angle := rand.Float64() * 2 * math.Pi
 		speed := rand.Float64()
-		entities[i] = Entity{ID: i}
-		movementComponents[i] = MovementComponent{
-			Position:     Vector2D{X: rand.Float64() * WindowWidth, Y: rand.Float64() * WindowHeight},
-			Velocity:     Vector2D{X: math.Cos(angle) * speed, Y: math.Sin(angle) * speed},
-			Acceleration: Vector2D{X: 0, Y: 0},
-		}
+		ids[i] = i
+		positionComponents[i] = Vector2D{X: rand.Float64() * WindowWidth, Y: rand.Float64() * WindowHeight}
+		velocityComponents[i] = Vector2D{X: math.Cos(angle) * speed, Y: math.Sin(angle) * speed}
+		accelerationComponents[i] = Vector2D{X: 0, Y: 0}
+
+		// movementComponents[i] = MovementComponent{
+		// 	Position:     Vector2D{X: rand.Float64() * WindowWidth, Y: rand.Float64() * WindowHeight},
+		// 	Velocity:     Vector2D{X: math.Cos(angle) * speed, Y: math.Sin(angle) * speed},
+		// 	Acceleration: Vector2D{X: 0, Y: 0},
+		// }
 	}
 
 	var movementSystem = MovementSystem{
@@ -388,23 +397,23 @@ func run() {
 
 		win.Clear(colornames.Black)
 
-		for i := range movementComponents {
-			pos := pixel.V(movementComponents[i].Position.X, movementComponents[i].Position.Y)
+		for i := 0; i < BoidsCount; i++ {
+			pos := pixel.V(positionComponents[i].X, positionComponents[i].Y)
 
-			angle := math.Atan2(movementComponents[i].Velocity.Y, movementComponents[i].Velocity.X) + math.Pi/2
+			angle := math.Atan2(velocityComponents[i].Y, velocityComponents[i].X) + math.Pi/2
 			mat := pixel.IM.Moved(pos).Rotated(pos, angle)
 
 			boidSprite.Draw(win, mat)
 		}
 
-		qt := NewQuadtree(boundary)
+		qt = NewQuadtree(boundary)
 
-		for i := range movementComponents {
-			qt.Insert(&movementComponents[i])
+		for i := 0; i < BoidsCount; i++ {
+			qt.Insert(&positionComponents[i], &ids[i])
 		}
 
-		steeringSystem.Update(&movementComponents, qt)
-		movementSystem.Update(&movementComponents)
+		steeringSystem.Update()
+		movementSystem.Update()
 
 		qt.Clear()
 
