@@ -7,8 +7,7 @@ import (
 	"image/color"
 	"math"
 	"math/rand"
-	"os"
-	"runtime/pprof"
+	"sync"
 	"time"
 
 	"github.com/faiface/pixel"
@@ -19,7 +18,7 @@ import (
 const (
 	WindowWidth  = 1440.0
 	WindowHeight = 900.0
-	BoidsCount   = 500
+	BoidsCount   = 200
 )
 
 type Entity struct {
@@ -55,7 +54,16 @@ func (r *Rectangle) Intersects(rangeRec Rectangle) bool {
 		rangeRec.Center.Y+rangeRec.Height/2 < r.Center.Y-r.Height/2)
 }
 
-const capacity = 32 // adjust as needed
+const capacity = 16 // adjust as needed
+
+var quadtreePool = sync.Pool{
+	New: func() interface{} {
+		return &Quadtree{
+			Components: make([]*MovementComponent, 0, capacity),
+		}
+	},
+}
+
 type Quadtree struct {
 	Boundary       Rectangle
 	Components     []*MovementComponent
@@ -64,9 +72,39 @@ type Quadtree struct {
 }
 
 func NewQuadtree(boundary Rectangle) *Quadtree {
-	return &Quadtree{
-		Boundary:   boundary,
-		Components: make([]*MovementComponent, 0, capacity),
+	qt := quadtreePool.Get().(*Quadtree)
+	qt.Boundary = boundary
+	return qt
+}
+
+func (qt *Quadtree) Clear() {
+	for i := range qt.Components {
+		qt.Components[i] = nil
+	}
+	qt.Components = qt.Components[:0]
+	qt.Divided = false
+	if qt.NW != nil {
+		qt.NW.Clear()
+		quadtreePool.Put(qt.NW)
+		qt.NW = nil
+	}
+
+	if qt.NE != nil {
+		qt.NE.Clear()
+		quadtreePool.Put(qt.NE)
+		qt.NE = nil
+	}
+
+	if qt.SW != nil {
+		qt.SW.Clear()
+		quadtreePool.Put(qt.SW)
+		qt.SW = nil
+	}
+
+	if qt.SE != nil {
+		qt.SE.Clear()
+		quadtreePool.Put(qt.SE)
+		qt.SE = nil
 	}
 }
 
@@ -126,8 +164,8 @@ type MovementSystem struct {
 func (ms *MovementSystem) Update(movementComponents *[BoidsCount]MovementComponent) {
 	for i := range movementComponents {
 		var m = &movementComponents[i]
-		m.Position.Add(m.Velocity)
-		m.Velocity.Add(m.Acceleration)
+		m.Position.Add(&m.Velocity)
+		m.Velocity.Add(&m.Acceleration)
 		m.Velocity.Limit(ms.maxSpeed)
 		m.Acceleration.Multiply(0)
 	}
@@ -166,14 +204,14 @@ func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementCompone
 				continue
 			}
 
-			d := current.Position.Distance(other.Position)
-			alignmentSteering.Add(other.Velocity)
-			cohesionSteering.Add(other.Position)
+			d := current.Position.Distance(&other.Position)
+			alignmentSteering.Add(&other.Velocity)
+			cohesionSteering.Add(&other.Position)
 
 			diff := current.Position
-			diff.Subtract(other.Position)
+			diff.Subtract(&other.Position)
 			diff.Divide(d) // Not squared?
-			separationSteering.Add(diff)
+			separationSteering.Add(&diff)
 
 			neighborCount++
 		}
@@ -182,27 +220,27 @@ func (bs *SteeringSystem) Update(movementComponents *[BoidsCount]MovementCompone
 
 			alignmentSteering.Divide(neighborCount)
 			alignmentSteering.SetMagnitude(bs.maxSpeed)
-			alignmentSteering.Subtract(current.Velocity)
+			alignmentSteering.Subtract(&current.Velocity)
 			alignmentSteering.Limit(bs.maxForce)
 
 			cohesionSteering.Divide(neighborCount)
-			cohesionSteering.Subtract(current.Position)
+			cohesionSteering.Subtract(&current.Position)
 			cohesionSteering.SetMagnitude(bs.maxSpeed)
-			cohesionSteering.Subtract(current.Velocity)
+			cohesionSteering.Subtract(&current.Velocity)
 			cohesionSteering.Limit(bs.maxForce)
 
 			separationSteering.Divide(neighborCount)
 			separationSteering.SetMagnitude(bs.maxSpeed)
-			separationSteering.Subtract(current.Velocity)
+			separationSteering.Subtract(&current.Velocity)
 			separationSteering.SetMagnitude(bs.maxForce)
 
 			alignmentSteering.Multiply(bs.alignmentFactor)
 			cohesionSteering.Multiply(bs.cohesionFactor)
 			separationSteering.Multiply(bs.separationFactor)
 
-			current.Acceleration.Add(alignmentSteering)
-			current.Acceleration.Add(cohesionSteering)
-			current.Acceleration.Add(separationSteering)
+			current.Acceleration.Add(&alignmentSteering)
+			current.Acceleration.Add(&cohesionSteering)
+			current.Acceleration.Add(&separationSteering)
 			current.Acceleration.Divide(3) // WHY?
 		}
 
@@ -293,11 +331,19 @@ func run() {
 		maxSpeed:          4,
 	}
 
+	boidSprite := createIsoscelesTriangleSprite(10, 20) // Adjust baseLength and height as needed
+
+	boundary := Rectangle{
+		Center: vector.Vector2D{X: WindowWidth / 2, Y: WindowHeight / 2},
+		Width:  WindowWidth,
+		Height: WindowHeight,
+	}
+
 	for !win.Closed() {
 		start := time.Now()
 
 		// Runtime parameter adjustments
-		adjustFactor := 0.01 // Adjust by a small amount for fine control
+		adjustFactor := 0.1
 		if win.JustPressed(pixelgl.KeyW) {
 			steeringSystem.cohesionFactor += adjustFactor
 			fmt.Printf("Cohesion Factor: %f\n", steeringSystem.cohesionFactor)
@@ -331,7 +377,7 @@ func run() {
 			fmt.Printf("Neighborhood Range: %f\n", steeringSystem.neighborhoodRange)
 		}
 
-		adjustSpeed := 0.1 // Adjust speed in slightly larger increments
+		adjustSpeed := 0.1
 		if win.JustPressed(pixelgl.KeyR) {
 			steeringSystem.maxSpeed += adjustSpeed
 			fmt.Printf("Max Speed: %f\n", steeringSystem.maxSpeed)
@@ -342,7 +388,6 @@ func run() {
 
 		win.Clear(colornames.Black)
 
-		boidSprite := createIsoscelesTriangleSprite(10, 20) // Adjust baseLength and height as needed
 		for i := range movementComponents {
 			pos := pixel.V(movementComponents[i].Position.X, movementComponents[i].Position.Y)
 
@@ -350,12 +395,6 @@ func run() {
 			mat := pixel.IM.Moved(pos).Rotated(pos, angle)
 
 			boidSprite.Draw(win, mat)
-		}
-
-		boundary := Rectangle{
-			Center: vector.Vector2D{X: WindowWidth / 2, Y: WindowHeight / 2},
-			Width:  WindowWidth,
-			Height: WindowHeight,
 		}
 
 		qt := NewQuadtree(boundary)
@@ -366,6 +405,9 @@ func run() {
 
 		steeringSystem.Update(&movementComponents, qt)
 		movementSystem.Update(&movementComponents)
+
+		qt.Clear()
+
 		win.Update()
 
 		elapsed := time.Since(start)
@@ -415,14 +457,15 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	// Start profiling
-	f, err := os.Create("myprogram.prof")
-	if err != nil {
 
-		fmt.Println(err)
-		return
+	// f, err := os.Create("myprogram.prof")
+	// if err != nil {
 
-	}
-	pprof.StartCPUProfile(f)
-	defer pprof.StopCPUProfile()
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// pprof.StartCPUProfile(f)
+	// defer pprof.StopCPUProfile()
+
 	pixelgl.Run(run)
 }

@@ -7,12 +7,12 @@ type Vector2D struct {
 	Y float64
 }
 
-func (v *Vector2D) Add(v2 Vector2D) {
+func (v *Vector2D) Add(v2 *Vector2D) {
 	v.X += v2.X
 	v.Y += v2.Y
 }
 
-func (v *Vector2D) Subtract(v2 Vector2D) {
+func (v *Vector2D) Subtract(v2 *Vector2D) {
 	v.X -= v2.X
 	v.Y -= v2.Y
 }
@@ -51,6 +51,6 @@ func (v *Vector2D) Multiply(z float64) {
 	v.Y *= z
 }
 
-func (v Vector2D) Distance(v2 Vector2D) float64 {
+func (v *Vector2D) Distance(v2 *Vector2D) float64 {
 	return math.Sqrt(math.Pow(v2.X-v.X, 2) + math.Pow(v2.Y-v.Y, 2))
 }
