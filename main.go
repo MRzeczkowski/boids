@@ -7,6 +7,8 @@ import (
 	"image/color"
 	"math"
 	"math/rand"
+	"os"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -16,9 +18,9 @@ import (
 )
 
 const (
-	WindowWidth  = 1440.0
-	WindowHeight = 900.0
-	BoidsCount   = 1000
+	WindowWidth  = 1920.0
+	WindowHeight = 1020.0
+	BoidsCount   = 5000
 )
 
 // Entity is not needed. Boids will be identified by their number from 0 to BoidsCount
@@ -31,23 +33,35 @@ type Velocity = Vector2D
 type Acceleration = Vector2D
 
 type Rectangle struct {
-	Center Position
-	Width  float64
-	Height float64
+	Center     Position
+	Width      float64
+	Height     float64
+	HalfWidth  float64
+	HalfHeight float64
 }
 
-func (r *Rectangle) Contains(point Position) bool {
-	return point.X >= r.Center.X-r.Width/2 &&
-		point.X <= r.Center.X+r.Width/2 &&
-		point.Y >= r.Center.Y-r.Height/2 &&
-		point.Y <= r.Center.Y+r.Height/2
+func NewRectangle(center Position, width, height float64) *Rectangle {
+	return &Rectangle{
+		Center:     center,
+		Width:      width,
+		Height:     height,
+		HalfWidth:  width / 2,
+		HalfHeight: height / 2,
+	}
 }
 
-func (r *Rectangle) Intersects(rangeRec Rectangle) bool {
-	return !(rangeRec.Center.X-rangeRec.Width/2 > r.Center.X+r.Width/2 ||
-		rangeRec.Center.X+rangeRec.Width/2 < r.Center.X-r.Width/2 ||
-		rangeRec.Center.Y-rangeRec.Height/2 > r.Center.Y+r.Height/2 ||
-		rangeRec.Center.Y+rangeRec.Height/2 < r.Center.Y-r.Height/2)
+func (r *Rectangle) Contains(point *Position) bool {
+	dx := point.X - r.Center.X
+	dy := point.Y - r.Center.Y
+	return (dx <= r.HalfWidth && dx >= -r.HalfWidth) &&
+		(dy <= r.HalfHeight && dy >= -r.HalfHeight)
+}
+
+func (r *Rectangle) Intersects(rangeRec *Rectangle) bool {
+	dx := rangeRec.Center.X - r.Center.X
+	dy := rangeRec.Center.Y - r.Center.Y
+	return (dx <= (r.HalfWidth+rangeRec.HalfWidth) && dx >= -(r.HalfWidth+rangeRec.HalfWidth)) &&
+		(dy <= (r.HalfHeight+rangeRec.HalfHeight) && dy >= -(r.HalfHeight+rangeRec.HalfHeight))
 }
 
 const capacity = 128 // adjust as needed
@@ -107,15 +121,15 @@ func (qt *Quadtree) Clear() {
 func (qt *Quadtree) Subdivide() {
 	x, y := qt.Boundary.Center.X, qt.Boundary.Center.Y
 	w, h := qt.Boundary.Width/2, qt.Boundary.Height/2
-	qt.NW = NewQuadtree(Rectangle{Vector2D{X: x - w/2, Y: y - h/2}, w, h})
-	qt.NE = NewQuadtree(Rectangle{Vector2D{X: x + w/2, Y: y - h/2}, w, h})
-	qt.SW = NewQuadtree(Rectangle{Vector2D{X: x - w/2, Y: y + h/2}, w, h})
-	qt.SE = NewQuadtree(Rectangle{Vector2D{X: x + w/2, Y: y + h/2}, w, h})
+	qt.NW = NewQuadtree(*NewRectangle(Vector2D{X: x - w/2, Y: y - h/2}, w, h))
+	qt.NE = NewQuadtree(*NewRectangle(Vector2D{X: x + w/2, Y: y - h/2}, w, h))
+	qt.SW = NewQuadtree(*NewRectangle(Vector2D{X: x - w/2, Y: y + h/2}, w, h))
+	qt.SE = NewQuadtree(*NewRectangle(Vector2D{X: x + w/2, Y: y + h/2}, w, h))
 	qt.Divided = true
 }
 
 func (qt *Quadtree) Insert(component *Position, i *int) bool {
-	if !qt.Boundary.Contains(*component) {
+	if !qt.Boundary.Contains(component) {
 		return false
 	}
 
@@ -131,13 +145,13 @@ func (qt *Quadtree) Insert(component *Position, i *int) bool {
 	return qt.NW.Insert(component, i) || qt.NE.Insert(component, i) || qt.SW.Insert(component, i) || qt.SE.Insert(component, i)
 }
 
-func (qt *Quadtree) Query(rangeRec Rectangle, foundComponents []*int) []*int {
+func (qt *Quadtree) Query(rangeRec *Rectangle, foundComponents []*int) []*int {
 	if !qt.Boundary.Intersects(rangeRec) {
 		return foundComponents
 	}
 
 	for _, component := range qt.Components {
-		if rangeRec.Contains(positionComponents[*component]) {
+		if rangeRec.Contains(&positionComponents[*component]) {
 			foundComponents = append(foundComponents, component)
 		}
 	}
@@ -188,11 +202,11 @@ func (bs *SteeringSystem) Update() {
 
 		var neighborCount float64 = 0.0
 
-		rangeRec := Rectangle{
-			Center: positionComponents[i],
-			Width:  bs.neighborhoodRange,
-			Height: bs.neighborhoodRange,
-		}
+		rangeRec := NewRectangle(
+			positionComponents[i],
+			bs.neighborhoodRange,
+			bs.neighborhoodRange,
+		)
 
 		neighbours := qt.Query(rangeRec, nil)
 
@@ -340,13 +354,15 @@ func run() {
 		maxSpeed:          4,
 	}
 
-	boidSprite := createIsoscelesTriangleSprite(10, 20) // Adjust baseLength and height as needed
+	boidSprite := createIsoscelesTriangleSprite(5, 10) // Adjust baseLength and height as needed
 
-	boundary := Rectangle{
-		Center: vector.Vector2D{X: WindowWidth / 2, Y: WindowHeight / 2},
-		Width:  WindowWidth,
-		Height: WindowHeight,
-	}
+	batch := pixel.NewBatch(&pixel.TrianglesData{}, boidSprite.Picture())
+
+	boundary := NewRectangle(
+		vector.Vector2D{X: WindowWidth / 2, Y: WindowHeight / 2},
+		WindowWidth,
+		WindowHeight,
+	)
 
 	for !win.Closed() {
 		start := time.Now()
@@ -397,16 +413,10 @@ func run() {
 
 		win.Clear(colornames.Black)
 
-		for i := 0; i < BoidsCount; i++ {
-			pos := pixel.V(positionComponents[i].X, positionComponents[i].Y)
+		UpdateSprites(boidSprite, batch, win)
+		batch.Clear()
 
-			angle := math.Atan2(velocityComponents[i].Y, velocityComponents[i].X) + math.Pi/2
-			mat := pixel.IM.Moved(pos).Rotated(pos, angle)
-
-			boidSprite.Draw(win, mat)
-		}
-
-		qt = NewQuadtree(boundary)
+		qt = NewQuadtree(*boundary)
 
 		for i := 0; i < BoidsCount; i++ {
 			qt.Insert(&positionComponents[i], &ids[i])
@@ -422,6 +432,18 @@ func run() {
 		elapsed := time.Since(start)
 		fmt.Printf("Iteration took %d ms\n", elapsed.Milliseconds())
 	}
+}
+
+func UpdateSprites(boidSprite *pixel.Sprite, batch *pixel.Batch, win *pixelgl.Window) {
+	for i := 0; i < BoidsCount; i++ {
+		pos := pixel.V(positionComponents[i].X, positionComponents[i].Y)
+
+		angle := math.Atan2(velocityComponents[i].Y, velocityComponents[i].X) + math.Pi/2
+		mat := pixel.IM.Moved(pos).Rotated(pos, angle)
+
+		boidSprite.Draw(batch, mat)
+	}
+	batch.Draw(win)
 }
 
 func createIsoscelesTriangleSprite(baseLength, height float64) *pixel.Sprite {
@@ -467,14 +489,14 @@ func main() {
 
 	// Start profiling
 
-	// f, err := os.Create("myprogram.prof")
-	// if err != nil {
+	f, err := os.Create("myprogram.prof")
+	if err != nil {
 
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// pprof.StartCPUProfile(f)
-	// defer pprof.StopCPUProfile()
+		fmt.Println(err)
+		return
+	}
+	pprof.StartCPUProfile(f)
+	defer pprof.StopCPUProfile()
 
 	pixelgl.Run(run)
 }
