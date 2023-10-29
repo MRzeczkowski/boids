@@ -7,8 +7,6 @@ import (
 	"image/color"
 	"math"
 	"math/rand"
-	"os"
-	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -64,7 +62,7 @@ func (r *Rectangle) Intersects(rangeRec *Rectangle) bool {
 		(dy <= (r.HalfHeight+rangeRec.HalfHeight) && dy >= -(r.HalfHeight+rangeRec.HalfHeight))
 }
 
-const capacity = 128 // adjust as needed
+const capacity = 8 // adjust as needed
 
 var quadtreePool = sync.Pool{
 	New: func() interface{} {
@@ -231,7 +229,6 @@ func (bs *SteeringSystem) Update() {
 		}
 
 		if neighborCount > 0 {
-
 			alignmentSteering.Divide(neighborCount)
 			alignmentSteering.SetMagnitude(bs.maxSpeed)
 			alignmentSteering.Subtract(&velocityComponents[i])
@@ -258,56 +255,27 @@ func (bs *SteeringSystem) Update() {
 			accelerationComponents[i].Divide(3) // WHY?
 		}
 
-		const boundaryMargin = 50.0
-		const boundaryForce = 0.2
+		// If boid crosses left boundary
+		if positionComponents[i].X < 0 {
+			positionComponents[i].X = WindowWidth
+		}
 
-		const bounce = false
+		// If boid crosses right boundary
+		if positionComponents[i].X > WindowWidth {
+			positionComponents[i].X = 0
+		}
 
-		if bounce {
-			// // If boid is near left boundary
-			// if current.Position.X < boundaryMargin {
-			// 	current.Velocity.X += boundaryForce
-			// }
+		// If boid crosses bottom boundary
+		if positionComponents[i].Y < 0 {
+			positionComponents[i].Y = WindowHeight
+		}
 
-			// // If boid is near right boundary
-			// if current.Position.X > WindowWidth-boundaryMargin {
-			// 	current.Velocity.X -= boundaryForce
-			// }
-
-			// // If boid is near bottom boundary
-			// if current.Position.Y < boundaryMargin {
-			// 	current.Velocity.Y += boundaryForce
-			// }
-
-			// // If boid is near top boundary
-			// if current.Position.Y > WindowHeight-boundaryMargin {
-			// 	current.Velocity.Y -= boundaryForce
-			// }
-		} else {
-			// If boid crosses left boundary
-			if positionComponents[i].X < 0 {
-				positionComponents[i].X = WindowWidth
-			}
-
-			// If boid crosses right boundary
-			if positionComponents[i].X > WindowWidth {
-				positionComponents[i].X = 0
-			}
-
-			// If boid crosses bottom boundary
-			if positionComponents[i].Y < 0 {
-				positionComponents[i].Y = WindowHeight
-			}
-
-			// If boid crosses top boundary
-			if positionComponents[i].Y > WindowHeight {
-				positionComponents[i].Y = 0
-			}
+		// If boid crosses top boundary
+		if positionComponents[i].Y > WindowHeight {
+			positionComponents[i].Y = 0
 		}
 	}
 }
-
-//var movementComponents [BoidsCount]MovementComponent
 
 var ids [BoidsCount]int
 var positionComponents [BoidsCount]Position
@@ -333,12 +301,6 @@ func run() {
 		positionComponents[i] = Vector2D{X: rand.Float64() * WindowWidth, Y: rand.Float64() * WindowHeight}
 		velocityComponents[i] = Vector2D{X: math.Cos(angle) * speed, Y: math.Sin(angle) * speed}
 		accelerationComponents[i] = Vector2D{X: 0, Y: 0}
-
-		// movementComponents[i] = MovementComponent{
-		// 	Position:     Vector2D{X: rand.Float64() * WindowWidth, Y: rand.Float64() * WindowHeight},
-		// 	Velocity:     Vector2D{X: math.Cos(angle) * speed, Y: math.Sin(angle) * speed},
-		// 	Acceleration: Vector2D{X: 0, Y: 0},
-		// }
 	}
 
 	var movementSystem = MovementSystem{
@@ -487,16 +449,23 @@ func sign(p1, p2, p3 pixel.Vec) float64 {
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
-	// Start profiling
+	// p, err := os.Create("myprogram.prof")
+	// if err != nil {
 
-	f, err := os.Create("myprogram.prof")
-	if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// pprof.StartCPUProfile(p)
+	// defer pprof.StopCPUProfile()
 
-		fmt.Println(err)
-		return
-	}
-	pprof.StartCPUProfile(f)
-	defer pprof.StopCPUProfile()
+	// t, err := os.Create("myprogram.trace")
+	// if err != nil {
+
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// trace.Start(t)
+	// defer trace.Stop()
 
 	pixelgl.Run(run)
 }
